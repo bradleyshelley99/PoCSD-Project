@@ -1,5 +1,6 @@
 import pickle, logging 
 import xmlrpc.client
+import math
 
 # For locks: RSM_UNLOCKED=0 , RSM_LOCKED=1 
 RSM_UNLOCKED = bytearray(b'\x00') * 1
@@ -86,6 +87,15 @@ INODE_TYPE_FILE = 1
 INODE_TYPE_DIR = 2
 INODE_TYPE_SYM = 3
 
+# XOR use for checksums/failure checking
+def bxor(b1, b2): # use xor for bytes
+    result = bytearray()
+    for b1, b2 in zip(b1, b2):
+        result.append(b1 ^ b2)
+    return result
+
+def byte_xor(b1, b2):
+      return bytes([_a ^ _b for _a, _b in zip(b1, b2)])
 #### BLOCK LAYER 
 
 class DiskBlocks():
@@ -98,14 +108,26 @@ class DiskBlocks():
       print('Must specify valid cid')
       quit()
 
+    self.NumServers = args.ns
+    self.Ports = [args.port0, args.port1, args.port2, args.port3, args.port4,args.port5, args.port6, args.port7]
+    # removing None values in list
+
+    self.block_server = []
+    self.server_url =[]
+    self.Ports = list(filter(None,self.Ports))
     # initialize XMLRPC client connection to raw block server
-    if args.port:
-      PORT = args.port
+    if (self.NumServers != len(self.Ports)):
+      print("Must specify additional Ports to connect to all servers")
+      quit()
+
+    if(self.NumServers):
+      for i in range(len(self.Ports)):
+        self.server_url.append('http://' + SERVER_ADDRESS + ':' + str(self.Ports[i]))
     else:
       print('Must specify port number')
       quit()
-    server_url = 'http://' + SERVER_ADDRESS + ':' + str(PORT)
-    self.block_server = xmlrpc.client.ServerProxy(server_url, use_builtin_types=True)
+    for i in range(self.NumServers):
+      self.block_server.append(xmlrpc.client.ServerProxy(self.server_url[i], use_builtin_types=True))
 
     self.HandleFSConstants(args)
 
@@ -172,6 +194,13 @@ class DiskBlocks():
     # Number of filename+inode entries that can be stored in a single block
     FILE_ENTRIES_PER_DATA_BLOCK = BLOCK_SIZE // FILE_NAME_DIRENTRY_SIZE
 
+  #Virtual to physical map from virtual server blocks to what phyiscally might be
+  def Virtual_to_Physical(self,virtual_block_numb):
+      block_server_index = virtual_block_numb % (self.NumServers-1)
+      actual_block_num = math.floor(virtual_block_numb / self.NumServers)
+      return(block_server_index)
+
+
   ## Put: interface to write a raw block of data to the block indexed by block number
 ## Blocks are padded with zeroes up to BLOCK_SIZE
 
@@ -189,7 +218,60 @@ class DiskBlocks():
       # commenting this out as the request now goes to the server
       # self.block[block_number] = putdata
       # call Put() method on the server and check for error
-      ret = self.block_server.Put(block_number,putdata)
+      p_block_numb = int(math.floor(block_number / (self.NumServers-1)))
+
+     # p_block_numb = math.floor(block_number / (self.NumServers-1))
+      Split_id = (self.NumServers - 1) - (p_block_numb % self.NumServers)
+      #print("Split Id: " + str(Split_id))
+      if Split_id <= self.Virtual_to_Physical(block_number):
+        actual_id = self.Virtual_to_Physical(block_number)+1
+      else:
+        actual_id = self.Virtual_to_Physical(block_number)
+      #print("Actual ID :" + str(actual_id))
+      # Error Correction can go here
+      print("BLOCK NUMBER: ", block_number)
+      print("\tPHY BLOCK NUM: ", p_block_numb)
+      print("\tSERVER ID: ", Split_id)
+      print("\tPARITY ID: ", actual_id)
+
+      #Fix Parity
+      bad_data = self.block_server[actual_id].Get(p_block_numb)
+      # Get Returned error need to fix server
+      if bad_data == -1:
+        bad_data = bytearray(BLOCK_SIZE)
+        #Pull from every server besides broken server
+        for i in range(0,self.NumServers):
+          #Broken Server skip
+          if(i == actual_id):
+            None
+          else:
+            #Raid 5 Xoring
+            block_from_other_server = self.block_server[i].Get(p_block_numb)
+            bad_data = bxor(bad_data,block_from_other_server)
+        #Fix data    
+        Fixing_server_blank = self.block_server[actual_id].Put(p_block_numb,bad_data)        
+     
+     # if (data != -1):
+      #       return bytearray(data)
+      # # Means corruption of block
+      # else:
+      #   print("Block Corrupted")
+      #   #Need to correct error through other servers
+      #   remade_block = bytearray(BLOCK_SIZE)
+      #   #Pull from every server besides broken server
+      #   for i in range(0,self.NumServers):
+      #     #Broken Server skip
+      #     if(i == actual_id):
+      #       None
+      #     else:
+      #       #Raid 5 Xoring
+      #       block_from_other_server = self.block_server[i].Get(p_block_numb)
+      #       remade_block = bxor(remade_block,block_from_other_server)
+      #   #Fix data    
+      #   Fixing_server_blank = self.block_server[actual_id].Put(p_block_numb,remade_block)
+      #   return bytearray(remade_block)          
+
+      ret = self.block_server[block_number % (self.NumServers)].Put(block_number,putdata)
       if ret == -1:
         logging.error('Put: Server returns error')
         quit()
@@ -210,7 +292,7 @@ class DiskBlocks():
       # commenting this out as the request now goes to the server
       # return self.block[block_number]
       # call Get() method on the server
-      data = self.block_server.Get(block_number)
+      data = self.block_server[ block_number % (self.NumServers-1)].Get(block_number)
       # return as bytearray
       return bytearray(data)
 
@@ -223,7 +305,7 @@ class DiskBlocks():
 
     logging.debug ('RSM: ' + str(block_number))
     if block_number in range(0,TOTAL_NUM_BLOCKS):
-      data = self.block_server.RSM(block_number)
+      data = self.block_server[self.Virtual_to_Physical(block_number)].RSM(block_number)
       return bytearray(data)
 
     logging.error('RSM: Block number larger than TOTAL_NUM_BLOCKS: ' + str(block_number))
@@ -292,19 +374,59 @@ class DiskBlocks():
 
     logging.debug ('Get: ' + str(block_number))
     if block_number in range(0,TOTAL_NUM_BLOCKS):
-      # is it in the cache?
-      if block_number in self.blockcache:
-        logging.debug ('Get: cache hit for ' + str(block_number))
-        return self.blockcache[block_number]
+      #Find mapping for server
+      p_block_numb = math.floor(block_number / (self.NumServers-1))
+      Split_id = (self.NumServers - 1) - (p_block_numb % self.NumServers)
+      #print("Split Id: " + str(Split_id))
+      if Split_id <= self.Virtual_to_Physical(block_number):
+        actual_id = self.Virtual_to_Physical(block_number)+1
       else:
-        logging.debug ('Get: cache miss for ' + str(block_number))
-        # call Get() method on the server
-        data = self.ServerGet(block_number)
-        # convert to bytearray
-        result = bytearray(data)
-        # store to cache
-        self.blockcache[block_number] = result
-        return result
+        actual_id = self.Virtual_to_Physical(block_number)
+      #print("Actual ID :" + str(actual_id))
+      # Error Correction can go here
+      data = self.block_server[actual_id].Get(p_block_numb)
+      #If Get returns error assume its wrong checksum
+     # print("Is data working properly? " + str(data))
+      #print("True or false " + str(data!=-1))
+      print(data)
+      if (data != -1):      
+        if isinstance(data, bytes):
+             # print("Problem Below") 
+              return bytearray(data)
+        else:
+            return data
+      # Means corruption of block
+      else:
+        print("Block Corrupted")
+        #Need to correct error through other servers
+        remade_block = bytearray(BLOCK_SIZE)
+        #Pull from every server besides broken server
+        for i in range(0,self.NumServers):
+          #Broken Server skip
+          if(i == actual_id):
+            None
+          else:
+            #Raid 5 Xoring
+            block_from_other_server = self.block_server[i].Get(p_block_numb)
+            remade_block = bxor(remade_block,block_from_other_server)
+        #Fix data    
+        Fixing_server_blank = self.block_server[actual_id].Put(p_block_numb,remade_block)
+        return bytearray(remade_block)
+
+      #No Caching
+      # # is it in the cache?
+      # if block_number in self.blockcache:
+      #   logging.debug ('Get: cache hit for ' + str(block_number))
+      #   return self.blockcache[block_number]
+      # else:
+      #   logging.debug ('Get: cache miss for ' + str(block_number))
+      #   # call Get() method on the server
+      #   data = self.ServerGet(block_number)
+      #   # convert to bytearray
+      #   result = bytearray(data)
+      #   # store to cache
+      #   self.blockcache[block_number] = result
+      #   return result
 
     logging.error('Get: Block number larger than TOTAL_NUM_BLOCKS: ' + str(block_number))
     quit()
@@ -888,6 +1010,7 @@ class FileName():
     dir_inode = InodeNumber(self.RawBlocks, dir)
     dir_inode.InodeNumberToInode()
     if dir_inode.inode.type != INODE_TYPE_DIR:
+      print("Problem")
       logging.debug ("Create: dir is not a directory")
       return -1
 
