@@ -81,7 +81,8 @@ class FSShell():
     inobj.InodeNumberToInode()
     block_index = 0
     while block_index <= (inobj.inode.size // BLOCK_SIZE):
-      block = self.FileObject.RawBlocks.Get(inobj.inode.block_numbers[block_index])
+      if len(inobj.inode.block_numbers) > block_index:
+        block = self.FileObject.RawBlocks.Get(inobj.inode.block_numbers[block_index])
       if block_index == (inobj.inode.size // BLOCK_SIZE):
         end_position = inobj.inode.size % BLOCK_SIZE
       else:
@@ -180,67 +181,39 @@ class FSShell():
         if len(splitcmd) != 2:
           print ("Error: cd requires one argument")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.cd(splitcmd[1])
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "cat":
         if len(splitcmd) != 2:
           print ("Error: cat requires one argument")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.cat(splitcmd[1])
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "mkdir":
         if len(splitcmd) != 2:
           print ("Error: mkdir requires one argument")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.mkdir(splitcmd[1])
-          self.FileObject.RawBlocks.ForceInvalidate()
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "create":
         if len(splitcmd) != 2:
           print ("Error: create requires one argument")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.create(splitcmd[1])
-          self.FileObject.RawBlocks.ForceInvalidate()
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "ln":
         if len(splitcmd) != 3:
           print ("Error: ln requires two arguments")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.link(splitcmd[1], splitcmd[2])
-          self.FileObject.RawBlocks.ForceInvalidate()
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "chroot":
         if len(splitcmd) != 2:
           print ("Error: chroot requires one argument")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.chroot(splitcmd[1])
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "append":
         if len(splitcmd) != 3:
           print ("Error: append requires two arguments")
         else:
-          self.FileObject.RawBlocks.Acquire()
-          self.FileObject.RawBlocks.CheckAndInvalidate()
           self.append(splitcmd[1], splitcmd[2])
-          self.FileObject.RawBlocks.ForceInvalidate()
-          self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "ls":
-        self.FileObject.RawBlocks.Acquire()
-        self.FileObject.RawBlocks.CheckAndInvalidate()
         self.ls()
-        self.FileObject.RawBlocks.Release()
       elif splitcmd[0] == "showblock":
         if len(splitcmd) != 2:
           print ("Error: showblock requires one argument")
@@ -307,7 +280,7 @@ if __name__ == "__main__":
   logging.info('Initializing data structures...')
   RawBlocks = DiskBlocks(args)
   boot_block = b'\x00\x12\x34\x56' # constant 00123456 stored as beginning of boot block; no need to change this
-  RawBlocks.InitializeBlocks(boot_block)
+  #RawBlocks.InitializeBlocks(boot_block)
 
 
   # Print file system information and contents of first few blocks to memoryfs.log

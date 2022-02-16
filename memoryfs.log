@@ -1,3 +1,20 @@
 INFO:root:Initializing data structures...
-DEBUG:root:Put: block number 0 len 4
-00123456
+INFO:root:#### File system information:
+INFO:root:Number of blocks          : 256
+INFO:root:Block size (Bytes)        : 128
+INFO:root:Number of inodes          : 16
+INFO:root:inode size (Bytes)        : 16
+INFO:root:inodes per block          : 8
+INFO:root:Free bitmap offset        : 2
+INFO:root:Free bitmap size (blocks) : 2
+INFO:root:Inode table offset        : 4
+INFO:root:Inode table size (blocks) : 2
+INFO:root:Max blocks per file       : 2
+INFO:root:Data blocks offset        : 6
+INFO:root:Data block size (blocks)  : 250
+INFO:root:Raw block layer layout: (B: boot, S: superblock, F: free bitmap, I: inode, D: data
+INFO:root:0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345
+INFO:root:BSFFIIDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+INFO:root:#### Raw disk blocks: Initialized
+DEBUG:root:Get: 0
+DEBUG:root:Generating mapping for Server_ID: 0 Physical Block: 0 Parity_ID: 3 Parity Block: 0

@@ -1,21 +1,11 @@
-import pickle, logging 
+import pickle, logging
+from xmlrpc import server 
 import xmlrpc.client
 import math
 
-# For locks: RSM_UNLOCKED=0 , RSM_LOCKED=1 
-RSM_UNLOCKED = bytearray(b'\x00') * 1
-RSM_LOCKED = bytearray(b'\x01') * 1
-RSM_BLOCK = 0
 
-# Constants used for cache:
-# which raw block stores invalidation array
-INVALIDATE_BLOCK = 1
-# byte offset within INVALIDATE_BLOCK where invalidation array is stored
-# note - you need to ensure INVALIDATE_BYTE_OFFSET + MAX_CLIENTS < BLOCK_SIZE
-INVALIDATE_BYTE_OFFSET = 32
-# max number of clients
+# Max number of clients
 MAX_CLIENTS = 8
-
 
 # server address - default is 127.0.0.1, localhost
 SERVER_ADDRESS = '127.0.0.1'
@@ -80,6 +70,7 @@ FILE_NAME_DIRENTRY_SIZE = MAX_FILENAME + INODE_NUMBER_DIRENTRY_SIZE
 # Number of filename+inode entries that can be stored in a single block
 FILE_ENTRIES_PER_DATA_BLOCK = BLOCK_SIZE // FILE_NAME_DIRENTRY_SIZE
 
+#global DOWN_SERVER
 
 # Supported inode types
 INODE_TYPE_INVALID = 0
@@ -94,8 +85,6 @@ def bxor(b1, b2): # use xor for bytes
         result.append(b1 ^ b2)
     return result
 
-def byte_xor(b1, b2):
-      return bytes([_a ^ _b for _a, _b in zip(b1, b2)])
 #### BLOCK LAYER 
 
 class DiskBlocks():
@@ -114,6 +103,8 @@ class DiskBlocks():
 
     self.block_server = []
     self.server_url =[]
+    # Intially set as NONE
+    self.down_server = None
     self.Ports = list(filter(None,self.Ports))
     # initialize XMLRPC client connection to raw block server
     if (self.NumServers != len(self.Ports)):
@@ -123,15 +114,12 @@ class DiskBlocks():
     if(self.NumServers):
       for i in range(len(self.Ports)):
         self.server_url.append('http://' + SERVER_ADDRESS + ':' + str(self.Ports[i]))
+        self.block_server.append(xmlrpc.client.ServerProxy(self.server_url[i], use_builtin_types=True))
+        print(self.server_url[i])
     else:
       print('Must specify port number')
       quit()
-    for i in range(self.NumServers):
-      self.block_server.append(xmlrpc.client.ServerProxy(self.server_url[i], use_builtin_types=True))
-
     self.HandleFSConstants(args)
-
-    self.blockcache = {}
 
     ## The rest below is commented out, as the blocks are stored/initialized on the server
     # This class stores the raw block array
@@ -196,16 +184,29 @@ class DiskBlocks():
 
   #Virtual to physical map from virtual server blocks to what phyiscally might be
   def Virtual_to_Physical(self,virtual_block_numb):
+      # Generate Parity information
+      parity_block_numb = virtual_block_numb // (self.NumServers-1)
+      parity_id = (self.NumServers -1) -((parity_block_numb) % (self.NumServers))
+      
+      # Generate physical block locations
       block_server_index = virtual_block_numb % (self.NumServers-1)
-      actual_block_num = math.floor(virtual_block_numb / self.NumServers)
-      return(block_server_index)
+      actual_block_num = (virtual_block_numb // (self.NumServers-1))
+
+      #Check for indexing issues
+      if parity_id <= block_server_index:
+        block_server_index = block_server_index + 1
+
+      logging.debug("Generating mapping for Server_ID: " + str(block_server_index) +
+      " Physical Block: " + str(actual_block_num) + " Parity_ID: " + str(parity_id) +
+      " Parity Block: " + str(parity_block_numb))
+
+      return block_server_index,actual_block_num,parity_id,parity_block_numb
 
 
   ## Put: interface to write a raw block of data to the block indexed by block number
-## Blocks are padded with zeroes up to BLOCK_SIZE
+  ## Blocks are padded with zeroes up to BLOCK_SIZE
 
   def Put(self, block_number, block_data):
-
     logging.debug ('Put: block number ' + str(block_number) + ' len ' + str(len(block_data)) + '\n' + str(block_data.hex()))
     if len(block_data) > BLOCK_SIZE:
       logging.error('Put: Block larger than BLOCK_SIZE: ' + str(len(block_data)))
@@ -214,207 +215,171 @@ class DiskBlocks():
     if block_number in range(0,TOTAL_NUM_BLOCKS): 
       # ljust does the padding with zeros
       putdata = bytearray(block_data.ljust(BLOCK_SIZE,b'\x00'))
-      # Write block
-      # commenting this out as the request now goes to the server
-      # self.block[block_number] = putdata
-      # call Put() method on the server and check for error
-      p_block_numb = int(math.floor(block_number / (self.NumServers-1)))
-
-     # p_block_numb = math.floor(block_number / (self.NumServers-1))
-      Split_id = (self.NumServers - 1) - (p_block_numb % self.NumServers)
-      #print("Split Id: " + str(Split_id))
-      if Split_id <= self.Virtual_to_Physical(block_number):
-        actual_id = self.Virtual_to_Physical(block_number)+1
+      server_id,physical_block_numb, parity_id,parity_block_numb = self.Virtual_to_Physical(block_number)
+      #self.ServerPut(server_id,physical_block_numb,block_number,block_data)
+      #Server Parity
+      if server_id == self.down_server:
+          print("Failstop on Server: " + str(self.down_server))
+          #parity = self.GenerateParity(block_number,block_data)
+          # Create Block Parity
+          # Prepare to Xor data
+          prev_data = self.ServerGet(server_id,physical_block_numb)
+          prev_parity = self.ServerGet(parity_id,parity_block_numb)
+          block_data = bytearray(block_data.ljust(BLOCK_SIZE,b'\x00'))
+          mid = bxor(prev_data,block_data)
+          new_parity = bxor(mid,prev_parity)
+          logging.debug("Checking new_parity: " + str(new_parity))
+          new_parity = bytearray(new_parity.ljust(BLOCK_SIZE,b'\x00'))
+          logging.debug("Checking new_parity second cast: " + str(new_parity))
+          # End Create Block Parity
+          self.block_server[parity_id].Put(parity_block_numb,new_parity)
+      elif parity_id == self.down_server:
+            # Still can write just can't generate parity for this block
+            self.block_server[server_id].Put(physical_block_numb,putdata)
+      # Servers are working as expected
+      # Create Block Parity
       else:
-        actual_id = self.Virtual_to_Physical(block_number)
-      #print("Actual ID :" + str(actual_id))
-      # Error Correction can go here
-      print("BLOCK NUMBER: ", block_number)
-      print("\tPHY BLOCK NUM: ", p_block_numb)
-      print("\tSERVER ID: ", Split_id)
-      print("\tPARITY ID: ", actual_id)
+        
+        # Generate Parity
+        prev_data = self.ServerGet(server_id,physical_block_numb)
+        prev_parity = self.ServerGet(parity_id,parity_block_numb)
+        block_data = bytearray(block_data.ljust(BLOCK_SIZE,b'\x00'))
+        mid = bxor(prev_data,block_data)
+        new_parity = bxor(mid,prev_parity)
+        logging.debug("Within else statement serverPut")
+        logging.debug("Checking new_parity: " + str(new_parity))
+        new_parity = bytearray(new_parity.ljust(BLOCK_SIZE,b'\x00'))
+        logging.debug("Checking new_parity second cast: " + str(new_parity))
+        # Generate Parity
 
-      #Fix Parity
-      bad_data = self.block_server[actual_id].Get(p_block_numb)
-      # Get Returned error need to fix server
-      if bad_data == -1:
-        bad_data = bytearray(BLOCK_SIZE)
-        #Pull from every server besides broken server
-        for i in range(0,self.NumServers):
-          #Broken Server skip
-          if(i == actual_id):
-            None
-          else:
-            #Raid 5 Xoring
-            block_from_other_server = self.block_server[i].Get(p_block_numb)
-            bad_data = bxor(bad_data,block_from_other_server)
-        #Fix data    
-        Fixing_server_blank = self.block_server[actual_id].Put(p_block_numb,bad_data)        
-     
-     # if (data != -1):
-      #       return bytearray(data)
-      # # Means corruption of block
-      # else:
-      #   print("Block Corrupted")
-      #   #Need to correct error through other servers
-      #   remade_block = bytearray(BLOCK_SIZE)
-      #   #Pull from every server besides broken server
-      #   for i in range(0,self.NumServers):
-      #     #Broken Server skip
-      #     if(i == actual_id):
-      #       None
-      #     else:
-      #       #Raid 5 Xoring
-      #       block_from_other_server = self.block_server[i].Get(p_block_numb)
-      #       remade_block = bxor(remade_block,block_from_other_server)
-      #   #Fix data    
-      #   Fixing_server_blank = self.block_server[actual_id].Put(p_block_numb,remade_block)
-      #   return bytearray(remade_block)          
-
-      ret = self.block_server[block_number % (self.NumServers)].Put(block_number,putdata)
-      if ret == -1:
-        logging.error('Put: Server returns error')
-        quit()
+       # Check for Fail Stop Conditions           
+        #try:
+        self.block_server[parity_id].Put(parity_block_numb,new_parity)
+        """
+        except ConnectionRefusedError:
+         # server went down procced to failstop
+          self.down_server = parity_id
+          logging.debug("ServerPut got failstop on parity serverid: " +str(parity_id))
+        try:
+          self.block_server[server_id].Put(physical_block_numb,putdata)
+        except ConnectionRefusedError:
+          self.down_server = server_id 
+          logging.debug("ServerPut got failstop on serverid: " +str(server_id))
+        """
       return 0
+      
+    # Server Put
     else:
       logging.error('Put: Block out of range: ' + str(block_number))
       quit()
 
 
+  def GenerateParity(self,virtual_block,data):
+    server_id,physical_block_numb, parity_id,parity_block_numb = self.Virtual_to_Physical(virtual_block)
+    prev_data = self.ServerGet(server_id,physical_block_numb)
+    prev_parity = self.ServerGet(parity_id,parity_block_numb)
+    data = bytearray(data.ljust(BLOCK_SIZE, b'\x00'))
+    mid = bytearray(bxor(prev_data,data))
+    new_parity = bytearray(bxor(mid,prev_parity))
+    new_parity = bytearray(new_parity.ljust(BLOCK_SIZE,b'\x00'))
+    return new_parity
+
+
+  def RecoverBlock(self,server_id,virtual_block):
+    data = bytearray(BLOCK_SIZE)
+    logging.debug("Failstop on Server: " + str(server_id))
+    for i in range(0,self.NumServers):
+      if i != server_id:
+        block_data = bytearray(self.ServerGet(i,virtual_block))
+        data = bytearray(bxor(data,block_data))
+    logging.debug("Data is recovered: " + str(data.hex()))
+    return data
+
 ## Get: interface to read a raw block of data from block indexed by block number
 ## Equivalent to the textbook's BLOCK_NUMBER_TO_BLOCK(b)
 
-  def ServerGet(self, block_number):
+  def ServerGet(self, server,block_number):
+        
+    if server == self.down_server:
+    #  data = self.RecoverBlock(server,block_number)
+      logging.debug("Server has been down at " + str(server))
+      saved_data = self.RecoverBlock(server,block_number)
+      """
+      logging.debug("Server has been down at " + str(server))
+      saved_data = bytearray(BLOCK_SIZE)
+      logging.debug("Attempting to recover server: " + str(server) + " and block: " + str(block_number))
+      for i in range(0,self.NumServers):
+        if i != server:
+          xor_data = bytearray(self.ServerGet(i,block_number))
+          saved_data = bytearray(bxor(saved_data,xor_data))
+      logging.debug("Data was recovered and is:" + str(saved_data.hex()))
+      """
+    else:
+      #Check for fail stop case
+      try:
+        print(server)
+        saved_data = self.block_server[server].Get(block_number)
+      except ConnectionRefusedError:
+        
+        self.down_server = server
+        logging.debug("Server just now going down at " + str(server))
+        saved_data = self.RecoverBlock(server,block_number)
+        """"
+        saved_data = bytearray(BLOCK_SIZE)
+        logging.debug("Attempting to recover server: " + str(server) + " and block: " + str(block_number))
+        for i in range(0,self.NumServers):
+         if i != self.down_server:
+            xor_data = bytearray(self.ServerGet(i,block_number))
+            saved_data =  bytearray(bxor(saved_data,xor_data)) 
+        """
+    if (saved_data == -1 and self.down_server != None):
+      print("More than one server is down Fail-Stop active")
+      print("Block at " + str(block_number) +" and Server " + str(server) +" is bad")
+    if (saved_data == -1 and self.down_server == None):
+      logging.debug("Corrupt block at " + str(server) + " block: " + str(block_number))
+      saved_data = self.RecoverBlock(server,block_number)
+      """
+      saved_data = bytearray(BLOCK_SIZE)
+      logging.debug("Attempting to recover server: " + str(server) + " and block: " + str(block_number))
+      
+      for i in range(0,self.NumServers):
+        if i != self.down_server:
+          xor_data = bytearray(self.ServerGet(i,block_number))
+          saved_data = bytearray(bxor(saved_data,xor_data))   
+      """
+    logging.debug("ServerGet returning: " + str(bytearray(saved_data)))
+    return bytearray(saved_data)
 
-    logging.debug ('ServerGet: ' + str(block_number))
-    if block_number in range(0,TOTAL_NUM_BLOCKS):
-      # logging.debug ('\n' + str((self.block[block_number]).hex()))
-      # commenting this out as the request now goes to the server
-      # return self.block[block_number]
-      # call Get() method on the server
-      data = self.block_server[ block_number % (self.NumServers-1)].Get(block_number)
-      # return as bytearray
-      return bytearray(data)
+# Repair_Server -- Restart the server at specified port then recreate the destroyed disk blocks
+  def Repair_Server(self,Server):
+    # Reconnect to that server
+    self.server_url[Server] = xmlrpc.client.ServerProxy(self.server_url[Server],use_builtin_types=True)
+    # Reset the broken server it is now up
+    self.down_server = None
+    # Need to repair the disk blocks to that server
+    for block_number in range(0,TOTAL_NUM_BLOCKS// self.NumServers):
+      saved_data = bytearray(BLOCK_SIZE)
+      for i in range(0,self.NumServers):
+        if i != self.down_server:
+          xor_data = bytearray(self.ServerGet(i,block_number))
+          saved_data = bxor(saved_data,xor_data)
+      self.block_server[Server].Put(block_number,saved_data)
+      print("Saved block:" + str(block_number) +"in Server:" + str(Server))
 
-    logging.error('ServerGet: Block number larger than TOTAL_NUM_BLOCKS: ' + str(block_number))
-    quit()
-
-## RSM: read and set memory equivalent
-
-  def RSM(self, block_number):
-
-    logging.debug ('RSM: ' + str(block_number))
-    if block_number in range(0,TOTAL_NUM_BLOCKS):
-      data = self.block_server[self.Virtual_to_Physical(block_number)].RSM(block_number)
-      return bytearray(data)
-
-    logging.error('RSM: Block number larger than TOTAL_NUM_BLOCKS: ' + str(block_number))
-    quit()
-
-## Acquire and Release using a disk block lock
-
-  def Acquire(self):
-
-    logging.debug ('Acquire')
-    lockvalue = self.RSM(RSM_BLOCK);
-    logging.debug ("RSM_BLOCK Lock value: " + str(lockvalue))
-    while lockvalue[0] == 1: # test just first byte of block to check if RSM_LOCKED
-      logging.debug ("Acquire: spinning...")
-      lockvalue = self.RSM(RSM_BLOCK);
-    return 0
-
-  def Release(self):
-
-    logging.debug ('Release')
-    # Put()s a zero-filled block to release lock
-    self.Put(RSM_BLOCK,bytearray(RSM_UNLOCKED.ljust(BLOCK_SIZE,b'\x00')))
-    return 0
-
-## Check if block cache needs to be invalidated
-
-  def CheckAndInvalidate(self):
-
-    logging.debug ('CheckAndInvalidate')
-    # Fetch block with invalidation information from server
-    invalidate_block = self.ServerGet(INVALIDATE_BLOCK)
-    # Extract state for this client
-    my_invalid_state = invalidate_block[INVALIDATE_BYTE_OFFSET + self.clientID]
-    if my_invalid_state:
-      print("InvalidatingLocalCache")
-      logging.debug ('CheckAndInvalidate: invalidating cache')
-      # invalidate block cache
-      self.blockcache = {}
-      # change entry for this client to 0 - the cache has been invalidated
-      invalidate_block[INVALIDATE_BYTE_OFFSET + self.clientID] = 0 
-      # write back to server
-      self.Put(INVALIDATE_BLOCK,invalidate_block)
-    return 0
-
-## Force the invalidation of all block caches
-
-  def ForceInvalidate(self):
-
-    logging.debug ('ForceInvalidate')
-    print("CacheInvalidationIssued")
-    # Fetch block with invalidation information from server
-    invalidate_block = self.ServerGet(INVALIDATE_BLOCK)
-    logging.debug ('ForceInvalidate: type is' + str(type(invalidate_block)))
-    # Fill in invalidate_value=1 for all clients
-    for i in range(0,MAX_CLIENTS):
-      invalidate_block[INVALIDATE_BYTE_OFFSET+i] = 1 
-    # Put block back into server
-    self.Put(INVALIDATE_BLOCK,invalidate_block)
-    # invalidate own cache
-    self.CheckAndInvalidate()
-    return 0
 
 ## Copy a block from the cache, or bring a block from server and add to the cache
 
   def Get(self, block_number):
-
     logging.debug ('Get: ' + str(block_number))
     if block_number in range(0,TOTAL_NUM_BLOCKS):
       #Find mapping for server
-      p_block_numb = math.floor(block_number / (self.NumServers-1))
-      Split_id = (self.NumServers - 1) - (p_block_numb % self.NumServers)
-      #print("Split Id: " + str(Split_id))
-      if Split_id <= self.Virtual_to_Physical(block_number):
-        actual_id = self.Virtual_to_Physical(block_number)+1
-      else:
-        actual_id = self.Virtual_to_Physical(block_number)
-      #print("Actual ID :" + str(actual_id))
-      # Error Correction can go here
-      data = self.block_server[actual_id].Get(p_block_numb)
-      #If Get returns error assume its wrong checksum
-     # print("Is data working properly? " + str(data))
-      #print("True or false " + str(data!=-1))
-      print(data)
-      if (data != -1):      
-        if isinstance(data, bytes):
-             # print("Problem Below") 
-              return bytearray(data)
-        else:
-            return data
-      # Means corruption of block
-      else:
-        print("Block Corrupted")
-        #Need to correct error through other servers
-        remade_block = bytearray(BLOCK_SIZE)
-        #Pull from every server besides broken server
-        for i in range(0,self.NumServers):
-          #Broken Server skip
-          if(i == actual_id):
-            None
-          else:
-            #Raid 5 Xoring
-            block_from_other_server = self.block_server[i].Get(p_block_numb)
-            remade_block = bxor(remade_block,block_from_other_server)
-        #Fix data    
-        Fixing_server_blank = self.block_server[actual_id].Put(p_block_numb,remade_block)
-        return bytearray(remade_block)
+      server_id,physical_block_numb, parity_id,parity_block_numb = self.Virtual_to_Physical(block_number)
+      # Just get grab block from that specific server
+      # need to check conditions which is why we go to ServerGet
+      
+      return (self.ServerGet(server_id,physical_block_numb))
 
       #No Caching
-      # # is it in the cache?
       # if block_number in self.blockcache:
       #   logging.debug ('Get: cache hit for ' + str(block_number))
       #   return self.blockcache[block_number]
@@ -671,13 +636,10 @@ class InodeNumber():
   def InodeNumberToInode(self):
 
     logging.debug('InodeNumberToInode: ' + str(self.inode_number))
-
     # locate which block has the inode we want
     raw_block_number = INODE_BLOCK_OFFSET + ((self.inode_number * INODE_SIZE) // BLOCK_SIZE)
-
     # Get the entire block containing inode from raw storage
     tempblock = self.RawBlocks.Get(raw_block_number)
-
     # Find the slice of the block for this inode_number
     start = (self.inode_number * INODE_SIZE) % BLOCK_SIZE
     end = start + INODE_SIZE
@@ -688,6 +650,7 @@ class InodeNumber():
     # load inode from byte array 
     self.inode.InodeFromBytearray(tempinode)
 
+    print(str(tempinode))
     logging.debug ('InodeNumberToInode : inode_number ' + str(self.inode_number) + ' raw_block_number: ' + str(raw_block_number) + ' slice start: ' + str(start) + ' end: ' + str(end))
     logging.debug ('tempinode: ' + str(tempinode.hex()))
 
